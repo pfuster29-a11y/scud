@@ -5,6 +5,8 @@
 
 Este documento detalla el historial completo de desarrollo, decisiones de arquitectura, resolución de problemas y refactorizaciones realizadas en **Scud**, una herramienta escrita en **Rust** para automatizar, simplificar y blindar la migración y gestión de sistemas Debian hacia **Debian Sid (Unstable)**.
 
+> *Nota: Tanto la documentación como el código fuente de este proyecto fueron desarrollados con la asistencia de un LLM.*
+
 ---
 
 ## 🛠️ Módulos y Arquitectura Implementada

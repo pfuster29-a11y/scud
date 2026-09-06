@@ -1,9 +1,10 @@
 #![allow(dead_code)]
 
 use gtk4::prelude::*;
-use gtk4::{glib, Application, ApplicationWindow, Box, Button, CheckButton, Orientation, ScrolledWindow, TextBuffer, TextView};
+use gtk4::{glib, Application, ApplicationWindow, Box, Button, CheckButton, MessageDialog, ButtonsType, MessageType, Orientation, ScrolledWindow, TextBuffer, TextView};
 use std::sync::mpsc;
 use std::time::Duration;
+use std::process::Command;
 
 mod apt_parser;
 mod backup;
@@ -19,6 +20,23 @@ fn main() {
     app.run();
 }
 
+/// Comprueba si timeshift o snapper están instalados en el sistema
+fn check_backup_tools() -> (bool, bool) {
+    let timeshift = Command::new("which")
+        .arg("timeshift")
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    let snapper = Command::new("which")
+        .arg("snapper")
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    (timeshift, snapper)
+}
+
 fn build_ui(app: &Application) {
     let vbox = Box::builder()
         .orientation(Orientation::Vertical)
@@ -29,10 +47,9 @@ fn build_ui(app: &Application) {
         .margin_end(10)
         .build();
 
-    // 1. Creamos una opción (checkbox) en la UI para decidir si migramos a Sid
     let check_migrator = CheckButton::builder()
         .label("Migrar fuentes de APT a Debian Sid (Unstable)")
-        .active(false) // Por defecto desactivado para que elijas a voluntad
+        .active(false)
         .build();
 
     let button = Button::builder()
@@ -53,18 +70,54 @@ fn build_ui(app: &Application) {
         .vexpand(true)
         .build();
 
-    // Agregamos los elementos al contenedor vertical
     vbox.append(&check_migrator);
     vbox.append(&button);
     vbox.append(&scrolled_window);
 
-    // Conectamos el evento del botón principal
-    button.connect_clicked(glib::clone!(@weak text_buffer, @weak button, @weak check_migrator => move |_| {
-        button.set_sensitive(false);
+    // Clonamos la ventana principal para asociar el diálogo emergente
+    let window = ApplicationWindow::builder()
+        .application(app)
+        .title("Scud - Gestor de Actualizaciones Seguras")
+        .default_width(700)
+        .default_height(550)
+        .child(&vbox)
+        .build();
+
+    button.connect_clicked(glib::clone!(@weak text_buffer, @weak button, @weak check_migrator, @strong window => move |_| {
         let want_migrate = check_migrator.is_active();
 
+        // Si el usuario quiere migrar, validamos herramientas de respaldo con una ventana emergente
+        if want_migrate {
+            let (has_timeshift, has_snapper) = check_backup_tools();
+            
+            if !has_timeshift && !has_snapper {
+                let dialog = MessageDialog::builder()
+                    .transient_for(&window)
+                    .modal(true)
+                    .message_type(MessageType::Warning)
+                    .buttons(ButtonsType::OkCancel)
+                    .text("Aviso de Seguridad: Sin Herramientas de Respaldo")
+                    .secondary_text("No se detectó Timeshift ni Snapper en tu sistema.\n\nSe recomienda instalar alguno para poder restaurar el sistema ante fallos graves en Sid, o continuar bajo tu propio riesgo.\n\n¿Deseas proceder de todas formas?")
+                    .build();
+
+                let response = dialog.run_future(); // O manejo síncrono/clásico en GTK
+                // Nota: Para mantenerlo simple con response modal de GTK4:
+                // Como run() clásico fue deprecado en algunas versiones recientes de GTK4, 
+                // usamos un closure de respuesta:
+                dialog.connect_response(glib::clone!(@weak check_migrator => move |dialog, response| {
+                    dialog.close();
+                    if response != gtk4::ResponseType::Ok {
+                        check_migrator.set_active(false); // Cancela la selección
+                    }
+                }));
+                dialog.show();
+                return; // Espera la decisión del usuario
+            }
+        }
+
+        button.set_sensitive(false);
         let status_msg = if want_migrate {
-            "1. Preparando respaldo y migrando fuentes a Debian Sid...\n2. Ejecutando auditoría de paquetes..."
+            "1. Preparando respaldo (.bak) y migrando fuentes a Debian Sid...\n2. Ejecutando auditoría de paquetes..."
         } else {
             "1. Ejecutando auditoría de paquetes sobre el sistema actual..."
         };
@@ -72,9 +125,7 @@ fn build_ui(app: &Application) {
 
         let (sender, receiver) = mpsc::channel();
 
-        // Ejecutamos en el hilo secundario
         std::thread::spawn(move || {
-            // Si el usuario marcó la opción, ejecutamos el migrador primero
             if want_migrate {
                 let migrator_instance = migrator::Migrator::new("/etc/apt/sources.list");
                 if let Err(e) = migrator_instance.prepare_migration("sid") {
@@ -83,12 +134,10 @@ fn build_ui(app: &Application) {
                 }
             }
 
-            // Luego ejecutamos la auditoría estándar
             let res = runner::run_full_audit();
             let _ = sender.send(res);
         });
 
-        // Monitoreamos el canal en el hilo principal
         glib::timeout_add_local(Duration::from_millis(100), glib::clone!(@strong text_buffer, @strong button => move || {
             match receiver.try_recv() {
                 Ok(result) => {
@@ -140,14 +189,6 @@ fn build_ui(app: &Application) {
             }
         }));
     }));
-
-    let window = ApplicationWindow::builder()
-        .application(app)
-        .title("Scud - Gestor de Actualizaciones Seguras")
-        .default_width(700)
-        .default_height(550)
-        .child(&vbox)
-        .build();
 
     window.present();
 }

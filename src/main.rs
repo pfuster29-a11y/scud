@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use gtk4::prelude::*;
-use gtk4::{glib, Application, ApplicationWindow, Box, Button, Orientation, ScrolledWindow, TextBuffer, TextView};
+use gtk4::{glib, Application, ApplicationWindow, Box, Button, CheckButton, Orientation, ScrolledWindow, TextBuffer, TextView};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -29,12 +29,18 @@ fn build_ui(app: &Application) {
         .margin_end(10)
         .build();
 
+    // 1. Creamos una opción (checkbox) en la UI para decidir si migramos a Sid
+    let check_migrator = CheckButton::builder()
+        .label("Migrar fuentes de APT a Debian Sid (Unstable)")
+        .active(false) // Por defecto desactivado para que elijas a voluntad
+        .build();
+
     let button = Button::builder()
-        .label("Migrar a Sid, Analizar y Actualizar")
+        .label("Iniciar Auditoría del Sistema")
         .build();
 
     let text_buffer = TextBuffer::new(None);
-    text_buffer.set_text("Presiona el botón para iniciar la migración y auditoría completa del sistema...");
+    text_buffer.set_text("Selecciona las opciones deseadas y presiona el botón para comenzar...");
 
     let text_view = TextView::builder()
         .buffer(&text_buffer)
@@ -47,41 +53,52 @@ fn build_ui(app: &Application) {
         .vexpand(true)
         .build();
 
+    // Agregamos los elementos al contenedor vertical
+    vbox.append(&check_migrator);
     vbox.append(&button);
     vbox.append(&scrolled_window);
 
     // Conectamos el evento del botón principal
-    button.connect_clicked(glib::clone!(@weak text_buffer, @weak button => move |_| {
+    button.connect_clicked(glib::clone!(@weak text_buffer, @weak button, @weak check_migrator => move |_| {
         button.set_sensitive(false);
-        text_buffer.set_text("1. Solicitando permisos, respaldando fuentes y preparando migración a Sid...\n2. Ejecutando auditoría de paquetes a continuación...");
+        let want_migrate = check_migrator.is_active();
+
+        let status_msg = if want_migrate {
+            "1. Preparando respaldo y migrando fuentes a Debian Sid...\n2. Ejecutando auditoría de paquetes..."
+        } else {
+            "1. Ejecutando auditoría de paquetes sobre el sistema actual..."
+        };
+        text_buffer.set_text(status_msg);
 
         let (sender, receiver) = mpsc::channel();
 
-        // Ejecutamos el flujo completo en el hilo secundario para no congelar la UI
+        // Ejecutamos en el hilo secundario
         std::thread::spawn(move || {
-            // Paso A: Preparar migración a 'sid' (incluye respaldo automático de sources.list)
-            let migrator_instance = migrator::Migrator::new("/etc/apt/sources.list");
-            if let Err(e) = migrator_instance.prepare_migration("sid") {
-                let _ = sender.send(Err(format!("Error en el proceso de migración: {}", e)));
-                return;
+            // Si el usuario marcó la opción, ejecutamos el migrador primero
+            if want_migrate {
+                let migrator_instance = migrator::Migrator::new("/etc/apt/sources.list");
+                if let Err(e) = migrator_instance.prepare_migration("sid") {
+                    let _ = sender.send(Err(format!("Error en el proceso de migración: {}", e)));
+                    return;
+                }
             }
 
-            // Paso B: Ejecutar la auditoría y simulación con las nuevas fuentes de Sid
+            // Luego ejecutamos la auditoría estándar
             let res = runner::run_full_audit();
             let _ = sender.send(res);
         });
 
-        // Monitoreamos el canal desde el hilo principal sin bloquear la interfaz
+        // Monitoreamos el canal en el hilo principal
         glib::timeout_add_local(Duration::from_millis(100), glib::clone!(@strong text_buffer, @strong button => move || {
             match receiver.try_recv() {
                 Ok(result) => {
                     match result {
                         Ok(raw_output) => {
                             let changes = apt_parser::parse_apt_output(&raw_output);
-                            let mut result_text = format!("=== Auditoría y Migración Scud (Sid) ===\nSe detectaron {} cambios de paquetes.\n\n", changes.len());
+                            let mut result_text = format!("=== Auditoría Scud ===\nSe detectaron {} cambios de paquetes.\n\n", changes.len());
                             
                             if changes.is_empty() {
-                                result_text.push_str("¡El sistema está listo en Sid y al día! No hay acciones pendientes.");
+                                result_text.push_str("¡El sistema está 100% al día! No hay acciones pendientes.");
                             } else {
                                 let mut safe_count = 0;
                                 let mut critical_count = 0;

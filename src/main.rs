@@ -323,9 +323,34 @@ fn build_ui(app: &Application) {
                     } else {
                         dialog.set_message_type(MessageType::Error);
                         dialog.set_text(Some("❌ Hubo un error durante la actualización"));
-                        dialog.set_secondary_text(Some(&msg));
+                        dialog.set_secondary_text(Some(&format!(
+                            "{}\n\n¿Deseas restaurar el archivo `sources.list` original desde el respaldo para volver a un estado seguro?",
+                            msg
+                        )));
                         dialog.add_button("Cerrar", gtk4::ResponseType::Close);
-                        dialog.connect_response(|dlg, _| dlg.close());
+                        let restore_btn = dialog.add_button("Restaurar Respaldo", gtk4::ResponseType::Accept);
+                        restore_btn.add_css_class("suggested-action");
+
+                        dialog.connect_response(move |dlg, response| {
+                            dlg.close();
+                            if response == gtk4::ResponseType::Accept {
+                                // Ejecutar la restauración y actualizar lista de paquetes
+                                let cp_status = Command::new("pkexec")
+                                    .arg("cp")
+                                    .arg("/etc/apt/sources.list.scud.bak")
+                                    .arg("/etc/apt/sources.list")
+                                    .status();
+
+                                if let Ok(s) = cp_status {
+                                    if s.success() {
+                                        let _ = Command::new("pkexec")
+                                            .arg("apt-get")
+                                            .arg("update")
+                                            .status();
+                                    }
+                                }
+                            }
+                        });
                     }
 
                     dialog.show();

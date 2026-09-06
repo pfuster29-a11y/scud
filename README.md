@@ -1,4 +1,3 @@
-# Scud
 <!-- Documentación redactada y estructurada con la asistencia de un LLM -->
 
 # Scud 🚀

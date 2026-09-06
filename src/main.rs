@@ -165,7 +165,7 @@ fn build_ui(app: &Application) {
                     glib::ControlFlow::Break
                 }
             }
-        }));
+        });
     }));
 
     // ==========================================
@@ -228,7 +228,7 @@ fn build_ui(app: &Application) {
                     glib::ControlFlow::Break
                 }
             }
-        }));
+        });
     });
 
     btn_migrate.connect_clicked(glib::clone!(@strong window, @strong run_migration => move |_| {
@@ -246,7 +246,12 @@ fn build_ui(app: &Application) {
             .build();
 
         dialog.add_button("Cancelar", gtk4::ResponseType::Cancel);
-        let accept_btn = dialog.add_button("Sí, acepto los riesgos (5s)", gtk4::ResponseType::Ok);
+        
+        // Hacemos el downcast correcto para convertir el Widget devuelto en un Button utilizable
+        let accept_btn = dialog.add_button("Sí, acepto los riesgos (5s)", gtk4::ResponseType::Ok)
+            .downcast::<gtk4::Button>()
+            .expect("El botón de aceptación debe ser un gtk4::Button");
+            
         accept_btn.set_sensitive(false);
 
         let countdown = std::rc::Rc::new(std::cell::Cell::new(5));

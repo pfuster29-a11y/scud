@@ -6,7 +6,9 @@ use gtk4::{
     ListBox, ListBoxRow, MessageDialog, MessageType, Notebook, Orientation,
     ProgressBar, ScrolledWindow,
 };
+use std::cell::RefCell;
 use std::process::Command;
+use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -338,8 +340,8 @@ fn build_ui(app: &Application) {
         });
     };
 
-    // --- Lógica: Migrar a Sid (envuelto en Rc para permitir llamadas múltiples seguras) ---
-    let run_migration = std::rc::Rc::new(glib::clone!(@weak tab2_status, @strong btn_migrate, @strong run_upgrade_window => move || {
+    // --- Lógica: Migrar a Sid envuelto en Rc<RefCell<Option<...>>> ---
+    let run_migration = Rc::new(RefCell::new(Some(glib::clone!(@weak tab2_status, @strong btn_migrate, @strong run_upgrade_window => move || {
         btn_migrate.set_sensitive(false);
         tab2_status.set_text("Generando respaldo y modificando fuentes a Sid...");
 
@@ -375,7 +377,7 @@ fn build_ui(app: &Application) {
                 }
             }
         });
-    }));
+    }))));
 
     btn_migrate.connect_clicked(glib::clone!(@strong window, @strong run_migration => move |_| {
         let dialog = MessageDialog::builder()
@@ -419,7 +421,9 @@ fn build_ui(app: &Application) {
         dialog.connect_response(glib::clone!(@strong run_migration => move |dialog, response| {
             dialog.close();
             if response == gtk4::ResponseType::Ok {
-                (*run_migration)();
+                if let Some(f) = run_migration.borrow_mut().take() {
+                    f();
+                }
             }
         }));
 

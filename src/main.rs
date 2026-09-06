@@ -4,7 +4,7 @@ use gtk4::prelude::*;
 use gtk4::{
     glib, Align, Application, ApplicationWindow, Box, Button, CheckButton, Image, Label,
     ListBox, ListBoxRow, MessageDialog, MessageType, Notebook, Orientation,
-    ScrolledWindow,
+    ProgressBar, ScrolledWindow,
 };
 use std::process::Command;
 use std::sync::mpsc;
@@ -200,8 +200,148 @@ fn build_ui(app: &Application) {
         .child(&notebook)
         .build();
 
+    // --- Función para mostrar ventana de progreso de actualización ---
+    let window_clone_for_upgrade = window.clone();
+    let run_upgrade_window = move || {
+        let upgrade_win = ApplicationWindow::builder()
+            .transient_for(&window_clone_for_upgrade)
+            .modal(true)
+            .title("Scud - Actualizando a Debian Sid")
+            .default_width(500)
+            .default_height(220)
+            .build();
+
+        let vbox = Box::builder()
+            .orientation(Orientation::Vertical)
+            .spacing(15)
+            .margin_top(25)
+            .margin_bottom(25)
+            .margin_start(25)
+            .margin_end(25)
+            .build();
+
+        let title_label = Label::builder()
+            .label("Actualizando el sistema operativo...")
+            .css_classes(vec!["heading".to_string()])
+            .build();
+
+        let progress_bar = ProgressBar::builder()
+            .show_text(true)
+            .text("Preparando actualización...")
+            .build();
+        progress_bar.set_pulse_step(0.05);
+
+        let info_label = Label::builder()
+            .label("Ejecutando `apt update` y `apt full-upgrade`...")
+            .wrap(true)
+            .justify(gtk4::Justification::Center)
+            .build();
+
+        vbox.append(&title_label);
+        vbox.append(&progress_bar);
+        vbox.append(&info_label);
+        upgrade_win.set_child(Some(&vbox));
+        upgrade_win.show();
+
+        // Animar la barra de progreso
+        let pb_clone = progress_bar.clone();
+        glib::timeout_add_local(Duration::from_millis(50), move || {
+            pb_clone.pulse();
+            glib::ControlFlow::Continue
+        });
+
+        // Ejecutar apt update y full-upgrade en hilo independiente
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            // 1. apt update
+            let update_status = Command::new("pkexec")
+                .arg("apt-get")
+                .arg("update")
+                .status();
+
+            match update_status {
+                Ok(s) if s.success() => {
+                    let _ = sender.send("Ejecutando apt full-upgrade...".to_string());
+                    // 2. apt full-upgrade
+                    let upgrade_status = Command::new("pkexec")
+                        .arg("apt-get")
+                        .arg("full-upgrade")
+                        .arg("-y")
+                        .status();
+
+                    match upgrade_status {
+                        Ok(us) if us.success() => {
+                            let _ = sender.send("SUCCESS".to_string());
+                        }
+                        Ok(_) => {
+                            let _ = sender.send("ERROR: El comando full-upgrade falló.".to_string());
+                        }
+                        Err(e) => {
+                            let _ = sender.send(format!("ERROR de ejecución: {}", e));
+                        }
+                    }
+                }
+                Ok(_) => {
+                    let _ = sender.send("ERROR: El comando apt update falló.".to_string());
+                }
+                Err(e) => {
+                    let _ = sender.send(format!("ERROR al invocar pkexec: {}", e));
+                }
+            }
+        });
+
+        let win_to_close = upgrade_win.clone();
+        let parent_window = window_clone_for_upgrade.clone();
+
+        glib::timeout_add_local(Duration::from_millis(500), move || {
+            match receiver.try_recv() {
+                Ok(msg) => {
+                    win_to_close.close();
+                    
+                    let dialog = MessageDialog::builder()
+                        .transient_for(&parent_window)
+                        .modal(true)
+                        .build();
+
+                    if msg == "SUCCESS" {
+                        dialog.set_message_type(MessageType::Info);
+                        dialog.set_text(Some("🎉 ¡Sistema actualizado a Debian Sid con éxito!"));
+                        dialog.set_secondary_text(Some(
+                            "Se han aplicado todos los cambios del repositorio inestable.\n\n\
+                            Es necesario reiniciar el equipo ahora para cargar el nuevo kernel y servicios."
+                        ));
+                        dialog.add_button("Cancelar", gtk4::ResponseType::Cancel);
+                        let reboot_btn = dialog.add_button("Reiniciar Ahora", gtk4::ResponseType::Ok);
+                        reboot_btn.add_css_class("suggested-action");
+
+                        dialog.connect_response(move |dlg, response| {
+                            dlg.close();
+                            if response == gtk4::ResponseType::Ok {
+                                let _ = Command::new("systemctl").arg("reboot").status();
+                            }
+                        });
+                    } else {
+                        dialog.set_message_type(MessageType::Error);
+                        dialog.set_text(Some("❌ Hubo un error durante la actualización"));
+                        dialog.set_secondary_text(Some(&msg));
+                        dialog.add_button("Cerrar", gtk4::ResponseType::Close);
+                        dialog.connect_response(|dlg, _| dlg.close());
+                    }
+
+                    dialog.show();
+                    glib::ControlFlow::Break
+                }
+                Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    win_to_close.close();
+                    glib::ControlFlow::Break
+                }
+            }
+        });
+    };
+
     // --- Lógica: Migrar a Sid ---
-    let run_migration = glib::clone!(@weak tab2_status, @strong btn_migrate => move || {
+    let run_migration = glib::clone!(@weak tab2_status, @strong btn_migrate, @strong run_upgrade_window => move || {
         btn_migrate.set_sensitive(false);
         tab2_status.set_text("Generando respaldo y modificando fuentes a Sid...");
 
@@ -220,7 +360,9 @@ fn build_ui(app: &Application) {
                 Ok(result) => {
                     match result {
                         Ok(_) => {
-                            tab2_status_clone.set_text("✅ ¡Migración completada!\nVe a 'Mantenimiento Sid' y presiona 'Refrescar Lista'.");
+                            tab2_status_clone.set_text("✅ ¡Fuentes modificadas a Sid! Iniciando actualización...");
+                            // Lanzar la ventana de progreso y el full-upgrade automáticamente
+                            run_upgrade_window();
                         }
                         Err(e) => {
                             tab2_status_clone.set_text(&format!("❌ Error: {}", e));
@@ -248,7 +390,7 @@ fn build_ui(app: &Application) {
                 "Estás a punto de migrar el sistema operativo hacia Debian Sid (Unstable).\n\n\
                 Debian Sid es un entorno de desarrollo continuo compuesto por software experimental y sin ciclos de prueba de estabilidad prolongados. Esto puede generar conflictos severos de dependencias, roturas en el gestor de arranque o pérdida de operatividad del sistema.\n\n\
                 Cuidado, ¡Sid puede romper tus juguetes!\n\n\
-                Se recomienda encarecidamente contar con respaldos externos antes de proceder."
+                Se ejecutará automáticamente un `apt full-upgrade` al finalizar la configuración de las fuentes."
             )
             .build();
 

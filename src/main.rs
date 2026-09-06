@@ -1,9 +1,11 @@
 #![allow(dead_code)]
 
 use gtk4::prelude::*;
-use gtk4::{glib, Application, ApplicationWindow, Box, Button, CheckButton, MessageDialog, ButtonsType, MessageType, Orientation, ScrolledWindow, TextBuffer, TextView};
-use std::sync::mpsc;
-use std::time::Duration;
+use gtk4::{
+    glib, Align, Application, ApplicationWindow, Box, Button, CheckButton, Image, Label,
+    ListBox, ListBoxRow, MessageDialog, ButtonsType, MessageType, Notebook, Orientation,
+    ScrolledWindow,
+};
 use std::process::Command;
 
 mod apt_parser;
@@ -20,176 +22,153 @@ fn main() {
     app.run();
 }
 
-/// Comprueba si timeshift o snapper están instalados en el sistema
 fn check_backup_tools() -> (bool, bool) {
-    let timeshift = Command::new("which")
-        .arg("timeshift")
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-
-    let snapper = Command::new("which")
-        .arg("snapper")
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-
+    let timeshift = Command::new("which").arg("timeshift").status().map(|s| s.success()).unwrap_or(false);
+    let snapper = Command::new("which").arg("snapper").status().map(|s| s.success()).unwrap_or(false);
     (timeshift, snapper)
 }
 
+/// Crea una fila visual para la lista de paquetes (Check + Icono + Textos)
+fn create_package_row(name: &str, desc: &str, is_safe: bool) -> ListBoxRow {
+    let row_box = Box::builder()
+        .orientation(Orientation::Horizontal)
+        .spacing(12)
+        .margin_top(8)
+        .margin_bottom(8)
+        .margin_start(8)
+        .margin_end(8)
+        .build();
+
+    let check = CheckButton::builder().valign(Align::Center).build();
+    if is_safe { check.set_active(true); }
+
+    let icon_name = if is_safe { "emblem-default" } else { "dialog-error" };
+    let icon = Image::builder()
+        .icon_name(icon_name)
+        .icon_size(gtk4::IconSize::Large)
+        .valign(Align::Center)
+        .build();
+
+    let text_box = Box::builder().orientation(Orientation::Vertical).spacing(2).build();
+    
+    let title = Label::builder()
+        .label(name)
+        .halign(Align::Start)
+        .css_classes(vec!["heading".to_string()])
+        .build();
+        
+    let subtitle = Label::builder()
+        .label(desc)
+        .halign(Align::Start)
+        .build();
+
+    text_box.append(&title);
+    text_box.append(&subtitle);
+
+    row_box.append(&check);
+    row_box.append(&icon);
+    row_box.append(&text_box);
+
+    let row = ListBoxRow::new();
+    row.set_child(Some(&row_box));
+    row.set_selectable(false);
+    row
+}
+
 fn build_ui(app: &Application) {
-    let vbox = Box::builder()
-        .orientation(Orientation::Vertical)
-        .spacing(10)
-        .margin_top(10)
-        .margin_bottom(10)
-        .margin_start(10)
-        .margin_end(10)
-        .build();
+    let notebook = Notebook::new();
 
-    let check_migrator = CheckButton::builder()
-        .label("Migrar fuentes de APT a Debian Sid (Unstable)")
-        .active(false)
-        .build();
+    // ==========================================
+    // PESTAÑA 1: MANTENIMIENTO SID
+    // ==========================================
+    let tab1_vbox = Box::builder().orientation(Orientation::Vertical).spacing(10).margin_top(10).margin_bottom(10).margin_start(10).margin_end(10).build();
 
-    let button = Button::builder()
-        .label("Iniciar Auditoría del Sistema")
-        .build();
+    let list_box = ListBox::new();
+    list_box.set_selection_mode(gtk4::SelectionMode::None);
+    list_box.add_css_class("boxed-list");
 
-    let text_buffer = TextBuffer::new(None);
-    text_buffer.set_text("Selecciona las opciones deseadas y presiona el botón para comenzar...");
-
-    let text_view = TextView::builder()
-        .buffer(&text_buffer)
-        .editable(false)
-        .wrap_mode(gtk4::WrapMode::Word)
-        .build();
+    // Filas de prueba para visualizar el diseño
+    list_box.append(&create_package_row("libc6", "Seguro para actualizar: v2.36 -> v2.37", true));
+    list_box.append(&create_package_row("systemd", "Actualización RIESGOSA: v252 -> v253 (Conflicto detectado)", false));
 
     let scrolled_window = ScrolledWindow::builder()
-        .child(&text_view)
+        .child(&list_box)
         .vexpand(true)
         .build();
 
-    vbox.append(&check_migrator);
-    vbox.append(&button);
-    vbox.append(&scrolled_window);
+    let bottom_bar = Box::builder().orientation(Orientation::Horizontal).spacing(10).build();
+    
+    let status_label = Label::builder()
+        .label("1 actualización segura, 1 problemática")
+        .hexpand(true)
+        .halign(Align::Start)
+        .build();
 
+    let btn_refresh = Button::builder().label("Refrescar Lista").build();
+    let btn_hold = Button::builder().label("Gestionar Retenciones").build();
+    let btn_apply = Button::builder().label("Aplicar Actualizaciones Seguras").css_classes(vec!["suggested-action".to_string()]).build();
+
+    bottom_bar.append(&status_label);
+    bottom_bar.append(&btn_refresh);
+    bottom_bar.append(&btn_hold);
+    bottom_bar.append(&btn_apply);
+
+    tab1_vbox.append(&scrolled_window);
+    tab1_vbox.append(&bottom_bar);
+
+    let tab1_label = Label::new(Some("Mantenimiento Sid"));
+    notebook.append_page(&tab1_vbox, Some(&tab1_label));
+
+    // ==========================================
+    // PESTAÑA 2: MIGRAR SISTEMA
+    // ==========================================
+    let tab2_vbox = Box::builder().orientation(Orientation::Vertical).spacing(15).margin_top(20).margin_bottom(20).margin_start(20).margin_end(20).build();
+    
+    let migrate_info = Label::builder()
+        .label("Utiliza esta sección para convertir tu instalación actual a Debian Sid.\nSe realizará un respaldo de /etc/apt/sources.list antes de proceder.")
+        .justify(gtk4::Justification::Center)
+        .build();
+
+    let btn_migrate = Button::builder().label("Convertir a Debian Sid (¡Riesgoso!)").halign(Align::Center).build();
+
+    tab2_vbox.append(&migrate_info);
+    tab2_vbox.append(&btn_migrate);
+
+    let tab2_label = Label::new(Some("Migrar Sistema"));
+    notebook.append_page(&tab2_vbox, Some(&tab2_label));
+
+    // Ventana Principal
     let window = ApplicationWindow::builder()
         .application(app)
         .title("Scud - Gestor de Actualizaciones Seguras")
-        .default_width(700)
+        .default_width(750)
         .default_height(550)
-        .child(&vbox)
+        .child(&notebook)
         .build();
 
-    button.connect_clicked(glib::clone!(@weak text_buffer, @strong button, @weak check_migrator, @strong window => move |_| {
-        let want_migrate = check_migrator.is_active();
+    // Lógica del botón de migración (Mantenemos la validación de backups)
+    btn_migrate.connect_clicked(glib::clone!(@strong window => move |_| {
+        let (has_timeshift, has_snapper) = check_backup_tools();
+        if !has_timeshift && !has_snapper {
+            let dialog = MessageDialog::builder()
+                .transient_for(&window)
+                .modal(true)
+                .message_type(MessageType::Warning)
+                .buttons(ButtonsType::OkCancel)
+                .text("Aviso de Seguridad: Sin Herramientas de Respaldo")
+                .secondary_text("No se detectó Timeshift ni Snapper.\n¿Deseas proceder bajo tu propio riesgo?")
+                .build();
 
-        // Bloque auxiliar para ejecutar la migración y la auditoría
-        let run_process = glib::clone!(@strong text_buffer, @strong button => move |migrate: bool| {
-            button.set_sensitive(false);
-            let status_msg = if migrate {
-                "1. Preparando respaldo (.bak) y migrando fuentes a Debian Sid...\n2. Ejecutando auditoría de paquetes..."
-            } else {
-                "1. Ejecutando auditoría de paquetes sobre el sistema actual..."
-            };
-            text_buffer.set_text(status_msg);
-
-            let (sender, receiver) = mpsc::channel();
-
-            std::thread::spawn(move || {
-                if migrate {
-                    let migrator_instance = migrator::Migrator::new("/etc/apt/sources.list");
-                    if let Err(e) = migrator_instance.prepare_migration("sid") {
-                        let _ = sender.send(Err(format!("Error en el proceso de migración: {}", e)));
-                        return;
-                    }
+            dialog.connect_response(|dialog, response| {
+                dialog.close();
+                if response == gtk4::ResponseType::Ok {
+                    println!("Ejecutando migración..."); // Aquí conectaremos el migrator real luego
                 }
-
-                let res = runner::run_full_audit();
-                let _ = sender.send(res);
             });
-
-            glib::timeout_add_local(Duration::from_millis(100), glib::clone!(@strong text_buffer, @strong button => move || {
-                match receiver.try_recv() {
-                    Ok(result) => {
-                        match result {
-                            Ok(raw_output) => {
-                                let changes = apt_parser::parse_apt_output(&raw_output);
-                                let mut result_text = format!("=== Auditoría Scud ===\nSe detectaron {} cambios de paquetes.\n\n", changes.len());
-                                
-                                if changes.is_empty() {
-                                    result_text.push_str("¡El sistema está 100% al día! No hay acciones pendientes.");
-                                } else {
-                                    let mut safe_count = 0;
-                                    let mut critical_count = 0;
-
-                                    for change in &changes {
-                                        match change.risk {
-                                            apt_parser::RiskLevel::Safe => safe_count += 1,
-                                            apt_parser::RiskLevel::Critical => critical_count += 1,
-                                        }
-                                    }
-
-                                    result_text.push_str(&format!("Resumen: 🟢 {} Seguros | 🔴 {} Críticos\n\n", safe_count, critical_count));
-                                    result_text.push_str("Detalle de paquetes:\n----------------------------------------\n");
-
-                                    for change in changes {
-                                        let icon = match change.risk {
-                                            apt_parser::RiskLevel::Safe => "🟢 [SEGURO]",
-                                            apt_parser::RiskLevel::Critical => "🔴 [CRÍTICO]",
-                                        };
-                                        result_text.push_str(&format!("{} {:?} -> {}\n", icon, change.action, change.name));
-                                    }
-                                }
-                                text_buffer.set_text(&result_text);
-                            }
-                            Err(e) => {
-                                text_buffer.set_text(&format!("Error en el proceso:\n{}", e));
-                            }
-                        }
-                        button.set_sensitive(true);
-                        glib::ControlFlow::Break
-                    }
-                    Err(mpsc::TryRecvError::Empty) => {
-                        glib::ControlFlow::Continue
-                    }
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        button.set_sensitive(true);
-                        glib::ControlFlow::Break
-                    }
-                }
-            }));
-        });
-
-        // Si el usuario quiere migrar, validamos herramientas de respaldo
-        if want_migrate {
-            let (has_timeshift, has_snapper) = check_backup_tools();
-            
-            if !has_timeshift && !has_snapper {
-                let dialog = MessageDialog::builder()
-                    .transient_for(&window)
-                    .modal(true)
-                    .message_type(MessageType::Warning)
-                    .buttons(ButtonsType::OkCancel)
-                    .text("Aviso de Seguridad: Sin Herramientas de Respaldo")
-                    .secondary_text("No se detectó Timeshift ni Snapper en tu sistema.\n\nSe recomienda instalar alguno para poder restaurar el sistema ante fallos graves en Sid, o continuar bajo tu propio riesgo.\n\n¿Deseas proceder de todas formas?")
-                    .build();
-
-                dialog.connect_response(glib::clone!(@weak check_migrator, @strong run_process => move |dialog, response| {
-                    dialog.close();
-                    if response == gtk4::ResponseType::Ok {
-                        run_process(true);
-                    } else {
-                        check_migrator.set_active(false);
-                    }
-                }));
-                dialog.show();
-                return;
-            }
+            dialog.show();
+        } else {
+            println!("Herramientas detectadas. Ejecutando migración...");
         }
-
-        run_process(want_migrate);
     }));
 
     window.present();

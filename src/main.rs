@@ -253,7 +253,6 @@ fn build_ui(app: &Application) {
         // Ejecutar apt update y full-upgrade en hilo independiente
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
-            // 1. apt update
             let update_status = Command::new("pkexec")
                 .arg("apt-get")
                 .arg("update")
@@ -262,7 +261,6 @@ fn build_ui(app: &Application) {
             match update_status {
                 Ok(s) if s.success() => {
                     let _ = sender.send("Ejecutando apt full-upgrade...".to_string());
-                    // 2. apt full-upgrade
                     let upgrade_status = Command::new("pkexec")
                         .arg("apt-get")
                         .arg("full-upgrade")
@@ -340,8 +338,8 @@ fn build_ui(app: &Application) {
         });
     };
 
-    // --- Lógica: Migrar a Sid ---
-    let run_migration = glib::clone!(@weak tab2_status, @strong btn_migrate, @strong run_upgrade_window => move || {
+    // --- Lógica: Migrar a Sid (envuelto en Rc para permitir llamadas múltiples seguras) ---
+    let run_migration = std::rc::Rc::new(glib::clone!(@weak tab2_status, @strong btn_migrate, @strong run_upgrade_window => move || {
         btn_migrate.set_sensitive(false);
         tab2_status.set_text("Generando respaldo y modificando fuentes a Sid...");
 
@@ -361,7 +359,6 @@ fn build_ui(app: &Application) {
                     match result {
                         Ok(_) => {
                             tab2_status_clone.set_text("✅ ¡Fuentes modificadas a Sid! Iniciando actualización...");
-                            // Lanzar la ventana de progreso y el full-upgrade automáticamente
                             run_upgrade_window();
                         }
                         Err(e) => {
@@ -378,7 +375,7 @@ fn build_ui(app: &Application) {
                 }
             }
         });
-    });
+    }));
 
     btn_migrate.connect_clicked(glib::clone!(@strong window, @strong run_migration => move |_| {
         let dialog = MessageDialog::builder()
@@ -422,7 +419,7 @@ fn build_ui(app: &Application) {
         dialog.connect_response(glib::clone!(@strong run_migration => move |dialog, response| {
             dialog.close();
             if response == gtk4::ResponseType::Ok {
-                run_migration();
+                (*run_migration)();
             }
         }));
 

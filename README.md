@@ -2,6 +2,8 @@
 
 # Scud 🚀
 
+> *Nota: Tanto la documentación como el código fuente de este proyecto fueron desarrollados con la asistencia de un LLM.*
+
 Herramienta en **Rust** diseñada para automatizar, simplificar y blindar la migración y actualización de sistemas Debian hacia **Debian Sid (Unstable)**, evitando falsos positivos y errores comunes de repositorios.
 
 ## ✨ Características Principales

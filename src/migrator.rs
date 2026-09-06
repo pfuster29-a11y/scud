@@ -32,6 +32,13 @@ impl Migrator {
         for line in content.lines() {
             let trimmed = line.trim();
             if trimmed.starts_with("deb ") || trimmed.starts_with("deb-src ") {
+                // Debian Sid (Unstable) no tiene un repositorio de seguridad separado;
+                // todo se gestiona desde el repositorio principal. Omitimos la línea de seguridad si es Sid.
+                if target_codename.eq_ignore_ascii_case("sid") 
+                    && (trimmed.contains("security.debian.org") || trimmed.contains("debian-security")) {
+                    continue; 
+                }
+
                 let parts: Vec<&str> = trimmed.split_whitespace().collect();
                 if parts.len() >= 3 {
                     let mut new_parts = parts.clone();

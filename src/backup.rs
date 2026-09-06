@@ -1,9 +1,29 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Crea un respaldo de la selección actual de paquetes del sistema.
+pub struct SystemBackup;
+
+impl SystemBackup {
+    /// Crea una copia de respaldo segura del archivo sources.list actual (requerido por el migrator)
+    pub fn create_sources_backup(sources_path: &str) -> Result<(), String> {
+        let path = Path::new(sources_path);
+        if !path.exists() {
+            return Err(format!("El archivo de fuentes no existe: {}", sources_path));
+        }
+
+        let backup_path = format!("{}.scud.bak", sources_path);
+
+        fs::copy(path, &backup_path)
+            .map_err(|e| format!("Error al crear el respaldo de sources.list: {}", e))?;
+
+        println!("[Backup] Respaldo de sources.list generado con éxito en: {}", backup_path);
+        Ok(())
+    }
+}
+
+/// Crea un respaldo de la selección actual de paquetes del sistema usando dpkg.
 /// Retorna la ruta absoluta del archivo de respaldo generado.
 pub fn create_package_backup() -> Result<String, String> {
     let home = std::env::var("HOME").map_err(|_| "No se pudo encontrar la variable HOME")?;

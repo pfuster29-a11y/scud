@@ -14,8 +14,8 @@ impl Migrator {
         }
     }
 
-    /// Prepara la migración preservando estrictamente las preferencias del usuario (componentes y repos terceros)
-    /// pero adaptando el codename y filtrando los conflictos incompatibles con la rama de destino (ej. Sid).
+    /// Prepara la migración respetando estrictamente las preferencias y componentes del usuario,
+    /// cambiando únicamente el codename y filtrando de forma inteligente los conflictos para Sid.
     pub fn prepare_migration(&self, target_codename: &str) -> Result<(), String> {
         let path = Path::new(&self.sources_path);
         if !path.exists() {
@@ -31,13 +31,13 @@ impl Migrator {
 
         let is_sid = target_codename.eq_ignore_ascii_case("sid");
         let mut updated_lines = Vec::new();
-        let mut seen_lines = HashSet::new();
+        let mut seen_signatures = HashSet::new();
 
-        // Agregar un encabezado claro indicando la autoría de Scud
+        // Encabezado claro de Scud
         updated_lines.push(format!(
             "# =====================================================================\n\
              # Archivo sources.list modificado y gestionado automáticamente por Scud\n\
-             # Rama de destino: Debian {} \n\
+             # Rama de destino: Debian {} (Unstable)\n\
              # =====================================================================",
             target_codename
         ));
@@ -45,64 +45,76 @@ impl Migrator {
         for line in content.lines() {
             let trimmed = line.trim();
 
-            // Preservar líneas vacías para mantener la legibilidad
             if trimmed.is_empty() {
                 updated_lines.push("".to_string());
                 continue;
             }
 
-            // Preservar comentarios del usuario (descartando cabeceras viejas de Scud si se re-ejecuta)
+            // Preservar comentarios del usuario (descartando encabezados viejos de Scud)
             if trimmed.starts_with('#') {
                 if !trimmed.contains("gestionado automáticamente por Scud") 
-                    && !trimmed.contains("Modificado automáticamente por Scud") {
-                    if seen_lines.insert(trimmed.to_string()) {
-                        updated_lines.push(line.to_string());
-                    }
+                    && !trimmed.contains("Modificado automáticamente por Scud") 
+                    && !trimmed.contains("Rama de destino") {
+                    updated_lines.push(line.to_string());
                 }
                 continue;
             }
 
             if trimmed.starts_with("deb ") || trimmed.starts_with("deb-src ") {
-                // Si el destino es Sid, filtramos y descartamos por completo los repositorios 
-                // de seguridad y de actualizaciones (-updates), ya que causan errores 404 y conflictos.
+                // Si el destino es Sid, filtramos y descartamos por completo seguridad y actualizaciones
                 if is_sid && (
                     trimmed.contains("security.debian.org") || 
-                    trimmed.contains("debian-security") || 
-                    trimmed.contains("-updates") || 
-                    trimmed.contains("/updates")
+                    trimmed.contains("debian-security")
                 ) {
-                    continue; 
+                    continue;
                 }
 
-                // Analizar los componentes de la línea APT para respetar las preferencias del usuario
-                let parts: Vec<&str> = trimmed.split_whitespace().collect();
-                if parts.len() >= 3 {
-                    let mut new_parts = parts.clone();
-                    
-                    // parts[0] = deb / deb-src
-                    // parts[1] = URL del repositorio
-                    // parts[2] = Codename / Suite original (ej. trixie)
-                    // parts[3..] = Componentes elegidos por el usuario (main, contrib, non-free, etc.) -> ¡Se conservan intactos!
-                    
-                    if is_sid && (parts[1].contains("deb.debian.org") || parts[1].contains("debian.org")) {
-                        new_parts[2] = target_codename;
-                    } else if !is_sid {
-                        new_parts[2] = target_codename;
+                // Análisis por tokens para aislar la URL, el codename y los componentes del usuario
+                let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+                if tokens.len() >= 3 {
+                    let mut url_idx = None;
+                    for (i, token) in tokens.iter().enumerate() {
+                        if token.contains("://") {
+                            url_idx = Some(i);
+                            break;
+                        }
                     }
 
-                    let reconstructed = new_parts.join(" ");
-                    // Evitar duplicados exactos si el archivo original tenía múltiples referencias cruzadas
-                    if seen_lines.insert(reconstructed.clone()) {
-                        updated_lines.push(reconstructed);
-                    }
-                } else {
-                    if seen_lines.insert(line.to_string()) {
+                    if let Some(u_idx) = url_idx {
+                        let codename_idx = u_idx + 1;
+                        if codename_idx < tokens.len() {
+                            let codename = tokens[codename_idx];
+
+                            // Si es Sid, descartar los repositorios de actualizaciones tipo trixie-updates
+                            if is_sid && (codename.contains("-updates") || codename.contains("/updates")) {
+                                continue;
+                            }
+
+                            let mut new_tokens = tokens.clone();
+                            // Reemplazar únicamente el codename por el de destino (ej. sid)
+                            new_tokens[codename_idx] = target_codename;
+
+                            // Crear una firma única basada en URL + componentes del usuario 
+                            // para evitar cualquier duplicado exacto en el archivo
+                            let url = tokens[u_idx];
+                            let components = &new_tokens[codename_idx + 1..];
+                            let signature = format!("{}|{}", url, components.join(" "));
+
+                            if seen_signatures.insert(signature) {
+                                updated_lines.push(new_tokens.join(" "));
+                            }
+                        } else {
+                            updated_lines.push(line.to_string());
+                        }
+                    } else {
                         updated_lines.push(line.to_string());
                     }
+                } else {
+                    updated_lines.push(line.to_string());
                 }
             } else {
-                // Repositorios de terceros o configuraciones especiales del usuario se mantienen tal cual
-                if seen_lines.insert(line.to_string()) {
+                // Repositorios de terceros o líneas especiales del usuario se mantienen sin cambios
+                if seen_signatures.insert(trimmed.to_string()) {
                     updated_lines.push(line.to_string());
                 }
             }
@@ -110,11 +122,11 @@ impl Migrator {
 
         let new_content = updated_lines.join("\n") + "\n";
 
-        // 3. Escribir los cambios limpios y filtrados
+        // 3. Escribir el nuevo archivo limpio
         fs::write(path, new_content)
             .map_err(|e| format!("Error al escribir el nuevo sources.list: {}", e))?;
 
-        println!("[Migrator] Migración a '{}' preparada con éxito respetando preferencias.", target_codename);
+        println!("[Migrator] Migración a '{}' preparada con éxito manteniendo preferencias de usuario.", target_codename);
         Ok(())
     }
 }

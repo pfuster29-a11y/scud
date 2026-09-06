@@ -30,11 +30,11 @@ fn build_ui(app: &Application) {
         .build();
 
     let button = Button::builder()
-        .label("Analizar y Actualizar Repositorios")
+        .label("Migrar a Sid, Analizar y Actualizar")
         .build();
 
     let text_buffer = TextBuffer::new(None);
-    text_buffer.set_text("Presiona el botón para iniciar la auditoría completa del sistema...");
+    text_buffer.set_text("Presiona el botón para iniciar la migración y auditoría completa del sistema...");
 
     let text_view = TextView::builder()
         .buffer(&text_buffer)
@@ -53,27 +53,35 @@ fn build_ui(app: &Application) {
     // Conectamos el evento del botón principal
     button.connect_clicked(glib::clone!(@weak text_buffer, @weak button => move |_| {
         button.set_sensitive(false);
-        text_buffer.set_text("1. Solicitando permisos para actualizar listas (revisa el cuadro de diálogo de root)...\n2. Analizando riesgos a continuación...");
+        text_buffer.set_text("1. Solicitando permisos, respaldando fuentes y preparando migración a Sid...\n2. Ejecutando auditoría de paquetes a continuación...");
 
         let (sender, receiver) = mpsc::channel();
 
-        // Ejecutamos la auditoría completa en el hilo secundario
+        // Ejecutamos el flujo completo en el hilo secundario para no congelar la UI
         std::thread::spawn(move || {
+            // Paso A: Preparar migración a 'sid' (incluye respaldo automático de sources.list)
+            let migrator_instance = migrator::Migrator::new("/etc/apt/sources.list");
+            if let Err(e) = migrator_instance.prepare_migration("sid") {
+                let _ = sender.send(Err(format!("Error en el proceso de migración: {}", e)));
+                return;
+            }
+
+            // Paso B: Ejecutar la auditoría y simulación con las nuevas fuentes de Sid
             let res = runner::run_full_audit();
             let _ = sender.send(res);
         });
 
-        // Monitoreamos el canal desde el hilo principal sin bloquear la UI
+        // Monitoreamos el canal desde el hilo principal sin bloquear la interfaz
         glib::timeout_add_local(Duration::from_millis(100), glib::clone!(@strong text_buffer, @strong button => move || {
             match receiver.try_recv() {
                 Ok(result) => {
                     match result {
                         Ok(raw_output) => {
                             let changes = apt_parser::parse_apt_output(&raw_output);
-                            let mut result_text = format!("=== Auditoría Completa de Scud ===\nSe detectaron {} cambios de paquetes.\n\n", changes.len());
+                            let mut result_text = format!("=== Auditoría y Migración Scud (Sid) ===\nSe detectaron {} cambios de paquetes.\n\n", changes.len());
                             
                             if changes.is_empty() {
-                                result_text.push_str("¡El sistema está 100% al día y estable! No hay acciones pendientes.");
+                                result_text.push_str("¡El sistema está listo en Sid y al día! No hay acciones pendientes.");
                             } else {
                                 let mut safe_count = 0;
                                 let mut critical_count = 0;
@@ -99,7 +107,7 @@ fn build_ui(app: &Application) {
                             text_buffer.set_text(&result_text);
                         }
                         Err(e) => {
-                            text_buffer.set_text(&format!("Error en el proceso de auditoría:\n{}", e));
+                            text_buffer.set_text(&format!("Error en el proceso:\n{}", e));
                         }
                     }
                     button.set_sensitive(true);

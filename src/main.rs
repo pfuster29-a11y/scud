@@ -132,14 +132,18 @@ fn build_ui(app: &Application) {
             let _ = sender.send(res);
         });
 
-        glib::timeout_add_local(Duration::from_millis(100), glib::clone!(@weak list_box, @weak status_label, @strong btn_refresh => move || {
+        let list_box_clone = list_box.clone();
+        let status_label_clone = status_label.clone();
+        let btn_refresh_clone = btn_refresh.clone();
+
+        glib::timeout_add_local(Duration::from_millis(100), move || -> glib::ControlFlow {
             match receiver.try_recv() {
                 Ok(result) => {
                     match result {
                         Ok(raw_output) => {
                             let changes = apt_parser::parse_apt_output(&raw_output);
                             if changes.is_empty() {
-                                status_label.set_text("El sistema está 100% al día.");
+                                status_label_clone.set_text("El sistema está 100% al día.");
                             } else {
                                 let mut safe_count = 0;
                                 let mut critical_count = 0;
@@ -149,19 +153,19 @@ fn build_ui(app: &Application) {
                                     if is_safe { safe_count += 1; } else { critical_count += 1; }
                                     
                                     let desc = format!("{:?} -> Detectado en la cola de APT", change.action);
-                                    list_box.append(&create_package_row(&change.name, &desc, is_safe));
+                                    list_box_clone.append(&create_package_row(&change.name, &desc, is_safe));
                                 }
-                                status_label.set_text(&format!("{} seguras, {} problemáticas", safe_count, critical_count));
+                                status_label_clone.set_text(&format!("{} seguras, {} problemáticas", safe_count, critical_count));
                             }
                         }
-                        Err(e) => { status_label.set_text(&format!("Error: {}", e)); }
+                        Err(e) => { status_label_clone.set_text(&format!("Error: {}", e)); }
                     }
-                    btn_refresh.set_sensitive(true);
+                    btn_refresh_clone.set_sensitive(true);
                     glib::ControlFlow::Break
                 }
                 Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    btn_refresh.set_sensitive(true);
+                    btn_refresh_clone.set_sensitive(true);
                     glib::ControlFlow::Break
                 }
             }
@@ -208,23 +212,26 @@ fn build_ui(app: &Application) {
             let _ = sender.send(res);
         });
 
-        glib::timeout_add_local(Duration::from_millis(100), glib::clone!(@weak tab2_status, @strong btn_migrate => move || {
+        let tab2_status_clone = tab2_status.clone();
+        let btn_migrate_clone = btn_migrate.clone();
+
+        glib::timeout_add_local(Duration::from_millis(100), move || -> glib::ControlFlow {
             match receiver.try_recv() {
                 Ok(result) => {
                     match result {
                         Ok(_) => {
-                            tab2_status.set_text("✅ ¡Migración completada!\nVe a 'Mantenimiento Sid' y presiona 'Refrescar Lista'.");
+                            tab2_status_clone.set_text("✅ ¡Migración completada!\nVe a 'Mantenimiento Sid' y presiona 'Refrescar Lista'.");
                         }
                         Err(e) => {
-                            tab2_status.set_text(&format!("❌ Error: {}", e));
-                            btn_migrate.set_sensitive(true);
+                            tab2_status_clone.set_text(&format!("❌ Error: {}", e));
+                            btn_migrate_clone.set_sensitive(true);
                         }
                     }
                     glib::ControlFlow::Break
                 }
                 Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    btn_migrate.set_sensitive(true);
+                    btn_migrate_clone.set_sensitive(true);
                     glib::ControlFlow::Break
                 }
             }
@@ -247,7 +254,6 @@ fn build_ui(app: &Application) {
 
         dialog.add_button("Cancelar", gtk4::ResponseType::Cancel);
         
-        // Hacemos el downcast correcto para convertir el Widget devuelto en un Button utilizable
         let accept_btn = dialog.add_button("Sí, acepto los riesgos (5s)", gtk4::ResponseType::Ok)
             .downcast::<gtk4::Button>()
             .expect("El botón de aceptación debe ser un gtk4::Button");

@@ -1,0 +1,11 @@
+[package]
+name = "scud"
+version = "0.1.0"
+edition = "2021"
+authors = ["Patricio"]
+description = "Safe upgrade and migration guard for Debian Sid"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+async-channel = "2.5.0"
+gtk4 = { version = "0.8", package = "gtk4" }

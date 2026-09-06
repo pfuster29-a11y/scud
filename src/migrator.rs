@@ -14,8 +14,9 @@ impl Migrator {
         }
     }
 
-    /// Prepara la migración respetando estrictamente las preferencias y componentes del usuario,
-    /// cambiando únicamente el codename y filtrando de forma inteligente los conflictos para Sid.
+    /// Prepara la migración preservando las preferencias del usuario.
+    /// Comenta automáticamente los repositorios incompatibles con Sid (security y updates) 
+    /// para evitar errores 404 sin perder la referencia original.
     pub fn prepare_migration(&self, target_codename: &str) -> Result<(), String> {
         let path = Path::new(&self.sources_path);
         if !path.exists() {
@@ -61,15 +62,24 @@ impl Migrator {
             }
 
             if trimmed.starts_with("deb ") || trimmed.starts_with("deb-src ") {
-                // Si el destino es Sid, filtramos y descartamos por completo seguridad y actualizaciones
-                if is_sid && (
+                // Si el destino es Sid, las líneas de seguridad y actualizaciones no existen por separado.
+                // En lugar de borrarlas, las comentamos para mantener la config del usuario intacta pero inactiva.
+                let is_incompatible_for_sid = is_sid && (
                     trimmed.contains("security.debian.org") || 
-                    trimmed.contains("debian-security")
-                ) {
+                    trimmed.contains("debian-security") || 
+                    trimmed.contains("-updates") || 
+                    trimmed.contains("/updates")
+                );
+
+                if is_incompatible_for_sid {
+                    updated_lines.push(format!(
+                        "# [Scud] Desactivado para Sid (no requerido en Unstable):\n# {}", 
+                        trimmed
+                    ));
                     continue;
                 }
 
-                // Análisis por tokens para aislar la URL, el codename y los componentes del usuario
+                // Análisis por tokens para actualizar el codename manteniendo componentes del usuario
                 let tokens: Vec<&str> = trimmed.split_whitespace().collect();
                 if tokens.len() >= 3 {
                     let mut url_idx = None;
@@ -83,19 +93,10 @@ impl Migrator {
                     if let Some(u_idx) = url_idx {
                         let codename_idx = u_idx + 1;
                         if codename_idx < tokens.len() {
-                            let codename = tokens[codename_idx];
-
-                            // Si es Sid, descartar los repositorios de actualizaciones tipo trixie-updates
-                            if is_sid && (codename.contains("-updates") || codename.contains("/updates")) {
-                                continue;
-                            }
-
                             let mut new_tokens = tokens.clone();
                             // Reemplazar únicamente el codename por el de destino (ej. sid)
                             new_tokens[codename_idx] = target_codename;
 
-                            // Crear una firma única basada en URL + componentes del usuario 
-                            // para evitar cualquier duplicado exacto en el archivo
                             let url = tokens[u_idx];
                             let components = &new_tokens[codename_idx + 1..];
                             let signature = format!("{}|{}", url, components.join(" "));
@@ -113,7 +114,7 @@ impl Migrator {
                     updated_lines.push(line.to_string());
                 }
             } else {
-                // Repositorios de terceros o líneas especiales del usuario se mantienen sin cambios
+                // Repositorios de terceros o líneas especiales se mantienen sin cambios
                 if seen_signatures.insert(trimmed.to_string()) {
                     updated_lines.push(line.to_string());
                 }
@@ -122,11 +123,11 @@ impl Migrator {
 
         let new_content = updated_lines.join("\n") + "\n";
 
-        // 3. Escribir el nuevo archivo limpio
+        // 3. Escribir el nuevo archivo
         fs::write(path, new_content)
             .map_err(|e| format!("Error al escribir el nuevo sources.list: {}", e))?;
 
-        println!("[Migrator] Migración a '{}' preparada con éxito manteniendo preferencias de usuario.", target_codename);
+        println!("[Migrator] Migración a '{}' preparada con éxito (repositorios incompatibles comentados).", target_codename);
         Ok(())
     }
 }

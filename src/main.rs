@@ -4,7 +4,7 @@ use gtk4::prelude::*;
 use gtk4::{
     glib, Align, Application, ApplicationWindow, Box, Button, CheckButton, Image, Label,
     ListBox, ListBoxRow, MessageDialog, MessageType, Notebook, Orientation,
-    ProgressBar, ScrolledWindow,
+    ProgressBar, ScrolledWindow, TextView, WrapMode,
 };
 use std::cell::RefCell;
 use std::process::Command;
@@ -209,17 +209,17 @@ fn build_ui(app: &Application) {
             .transient_for(&window_clone_for_upgrade)
             .modal(true)
             .title("Scud - Actualizando a Debian Sid")
-            .default_width(500)
-            .default_height(220)
+            .default_width(600)
+            .default_height(420)
             .build();
 
         let vbox = Box::builder()
             .orientation(Orientation::Vertical)
-            .spacing(15)
-            .margin_top(25)
-            .margin_bottom(25)
-            .margin_start(25)
-            .margin_end(25)
+            .spacing(10)
+            .margin_top(20)
+            .margin_bottom(20)
+            .margin_start(20)
+            .margin_end(20)
             .build();
 
         let title_label = Label::builder()
@@ -233,135 +233,187 @@ fn build_ui(app: &Application) {
             .build();
         progress_bar.set_pulse_step(0.05);
 
-        let info_label = Label::builder()
-            .label("Ejecutando `apt update` y `apt full-upgrade`...")
-            .wrap(true)
-            .justify(gtk4::Justification::Center)
+        // --- Terminal en vivo: muestra el output real de apt línea por línea ---
+        let terminal_view = TextView::builder()
+            .editable(false)
+            .cursor_visible(false)
+            .monospace(true)
+            .wrap_mode(WrapMode::WordChar)
+            .build();
+        terminal_view.add_css_class("scud-terminal");
+
+        let terminal_scroll = ScrolledWindow::builder()
+            .child(&terminal_view)
+            .vexpand(true)
+            .min_content_height(220)
             .build();
 
         vbox.append(&title_label);
         vbox.append(&progress_bar);
-        vbox.append(&info_label);
+        vbox.append(&terminal_scroll);
         upgrade_win.set_child(Some(&vbox));
         upgrade_win.show();
 
-        // Animar la barra de progreso
+        // Animar la barra de progreso (pulso indeterminado mientras corre apt).
+        // Envuelto en RefCell porque SourceId no es Copy y necesitamos poder
+        // sacarlo (una sola vez) desde dentro de un closure FnMut más abajo.
         let pb_clone = progress_bar.clone();
-        glib::timeout_add_local(Duration::from_millis(50), move || {
+        let pulse_id = glib::timeout_add_local(Duration::from_millis(50), move || {
             pb_clone.pulse();
             glib::ControlFlow::Continue
         });
+        let pulse_source = Rc::new(RefCell::new(Some(pulse_id)));
 
-        // Ejecutar apt update y full-upgrade en hilo independiente
-        let (sender, receiver) = mpsc::channel();
+        // Helper para agregar una línea a la terminal y hacer autoscroll.
+        let append_line = {
+            let terminal_view = terminal_view.clone();
+            move |text: &str| {
+                let buffer = terminal_view.buffer();
+                let mut end_iter = buffer.end_iter();
+                buffer.insert(&mut end_iter, text);
+                buffer.insert(&mut end_iter, "\n");
+                // Autoscroll al final
+                let end_mark = buffer.create_mark(None, &buffer.end_iter(), false);
+                terminal_view.scroll_mark_onscreen(&end_mark);
+            }
+        };
+
+        // Ejecutar apt update y luego full-upgrade en un hilo independiente,
+        // transmitiendo el output real en vivo (línea por línea) a través del
+        // canal en lugar de esperar en silencio a que termine todo el proceso.
+        let (sender, receiver) = mpsc::channel::<runner::AptLine>();
         std::thread::spawn(move || {
-            let update_status = Command::new("pkexec")
-                .arg("apt-get")
-                .arg("update")
-                .status();
+            // `run_privileged_apt_streaming` es síncrona: corre el comando entero
+            // y recién vuelve cuando terminó. La usamos primero con un canal
+            // "sonda" para el update, así podemos decidir si seguimos con el
+            // full-upgrade sin cerrar el canal principal antes de tiempo.
+            let (update_tx, update_rx) = mpsc::channel::<runner::AptLine>();
+            runner::run_privileged_apt_streaming(&["update"], update_tx);
 
-            match update_status {
-                Ok(s) if s.success() => {
-                    let _ = sender.send("Ejecutando apt full-upgrade...".to_string());
-                    let upgrade_status = Command::new("pkexec")
-                        .arg("apt-get")
-                        .arg("full-upgrade")
-                        .arg("-y")
-                        .status();
+            let mut update_result: Result<(), String> =
+                Err("El proceso de 'apt update' no devolvió resultado.".to_string());
 
-                    match upgrade_status {
-                        Ok(us) if us.success() => {
-                            let _ = sender.send("SUCCESS".to_string());
-                        }
-                        Ok(_) => {
-                            let _ = sender.send("ERROR: El comando full-upgrade falló.".to_string());
-                        }
-                        Err(e) => {
-                            let _ = sender.send(format!("ERROR de ejecución: {}", e));
-                        }
+            for msg in update_rx {
+                match msg {
+                    runner::AptLine::Output(line) => {
+                        let _ = sender.send(runner::AptLine::Output(line));
+                    }
+                    runner::AptLine::Done(res) => {
+                        update_result = res;
                     }
                 }
-                Ok(_) => {
-                    let _ = sender.send("ERROR: El comando apt update falló.".to_string());
+            }
+
+            match update_result {
+                Ok(()) => {
+                    let _ = sender.send(runner::AptLine::Output(
+                        "— apt update OK. Iniciando full-upgrade —".to_string(),
+                    ));
+                    runner::run_privileged_apt_streaming(&["full-upgrade", "-y"], sender);
                 }
                 Err(e) => {
-                    let _ = sender.send(format!("ERROR al invocar pkexec: {}", e));
+                    let _ = sender.send(runner::AptLine::Done(Err(format!(
+                        "Falló 'apt update': {}",
+                        e
+                    ))));
                 }
             }
         });
 
         let win_to_close = upgrade_win.clone();
         let parent_window = window_clone_for_upgrade.clone();
+        let progress_bar_clone = progress_bar.clone();
 
-        glib::timeout_add_local(Duration::from_millis(500), move || {
-            match receiver.try_recv() {
-                Ok(msg) => {
-                    win_to_close.close();
-                    
-                    let dialog = MessageDialog::builder()
-                        .transient_for(&parent_window)
-                        .modal(true)
-                        .build();
-
-                    if msg == "SUCCESS" {
-                        dialog.set_message_type(MessageType::Info);
-                        dialog.set_text(Some("🎉 ¡Sistema actualizado a Debian Sid con éxito!"));
-                        dialog.set_secondary_text(Some(
-                            "Se han aplicado todos los cambios del repositorio inestable.\n\n\
-                            Es necesario reiniciar el equipo ahora para cargar el nuevo kernel y servicios."
-                        ));
-                        dialog.add_button("Cancelar", gtk4::ResponseType::Cancel);
-                        let reboot_btn = dialog.add_button("Reiniciar Ahora", gtk4::ResponseType::Ok);
-                        reboot_btn.add_css_class("suggested-action");
-
-                        dialog.connect_response(move |dlg, response| {
-                            dlg.close();
-                            if response == gtk4::ResponseType::Ok {
-                                let _ = Command::new("systemctl").arg("reboot").status();
-                            }
-                        });
-                    } else {
-                        dialog.set_message_type(MessageType::Error);
-                        dialog.set_text(Some("❌ Hubo un error durante la actualización"));
-                        dialog.set_secondary_text(Some(&format!(
-                            "{}\n\n¿Deseas restaurar el archivo `sources.list` original desde el respaldo para volver a un estado seguro?",
-                            msg
-                        )));
-                        dialog.add_button("Cerrar", gtk4::ResponseType::Close);
-                        let restore_btn = dialog.add_button("Restaurar Respaldo", gtk4::ResponseType::Accept);
-                        restore_btn.add_css_class("suggested-action");
-
-                        dialog.connect_response(move |dlg, response| {
-                            dlg.close();
-                            if response == gtk4::ResponseType::Accept {
-                                // Ejecutar la restauración y actualizar lista de paquetes
-                                let cp_status = Command::new("pkexec")
-                                    .arg("cp")
-                                    .arg("/etc/apt/sources.list.scud.bak")
-                                    .arg("/etc/apt/sources.list")
-                                    .status();
-
-                                if let Ok(s) = cp_status {
-                                    if s.success() {
-                                        let _ = Command::new("pkexec")
-                                            .arg("apt-get")
-                                            .arg("update")
-                                            .status();
-                                    }
-                                }
-                            }
-                        });
+        // Sondeamos el canal seguido (cada 80ms) para que la terminal se sienta
+        // "en vivo" en lugar de actualizarse a los tirones.
+        glib::timeout_add_local(Duration::from_millis(80), move || {
+            // Drenamos todos los mensajes disponibles en esta pasada, no solo uno,
+            // para no quedarnos atrás si apt larga muchas líneas de golpe.
+            loop {
+                match receiver.try_recv() {
+                    Ok(runner::AptLine::Output(line)) => {
+                        append_line(&line);
                     }
+                    Ok(runner::AptLine::Done(result)) => {
+                        if let Some(id) = pulse_source.borrow_mut().take() {
+                            id.remove();
+                        }
+                        progress_bar_clone.set_fraction(1.0);
+                        win_to_close.close();
 
-                    dialog.show();
-                    glib::ControlFlow::Break
-                }
-                Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    win_to_close.close();
-                    glib::ControlFlow::Break
+                        let dialog = MessageDialog::builder()
+                            .transient_for(&parent_window)
+                            .modal(true)
+                            .build();
+
+                        match result {
+                            Ok(()) => {
+                                dialog.set_message_type(MessageType::Info);
+                                dialog.set_text(Some("🎉 ¡Sistema actualizado a Debian Sid con éxito!"));
+                                dialog.set_secondary_text(Some(
+                                    "Se han aplicado todos los cambios del repositorio inestable.\n\n\
+                                    Es necesario reiniciar el equipo ahora para cargar el nuevo kernel y servicios."
+                                ));
+                                dialog.add_button("Cancelar", gtk4::ResponseType::Cancel);
+                                let reboot_btn = dialog.add_button("Reiniciar Ahora", gtk4::ResponseType::Ok);
+                                reboot_btn.add_css_class("suggested-action");
+
+                                dialog.connect_response(move |dlg, response| {
+                                    dlg.close();
+                                    if response == gtk4::ResponseType::Ok {
+                                        let _ = Command::new("systemctl").arg("reboot").status();
+                                    }
+                                });
+                            }
+                            Err(msg) => {
+                                dialog.set_message_type(MessageType::Error);
+                                dialog.set_text(Some("❌ Hubo un error durante la actualización"));
+                                dialog.set_secondary_text(Some(&format!(
+                                    "{}\n\nRevisá el output de la terminal para más detalle. \
+                                    ¿Deseas restaurar el archivo `sources.list` original desde el respaldo para volver a un estado seguro?",
+                                    msg
+                                )));
+                                dialog.add_button("Cerrar", gtk4::ResponseType::Close);
+                                let restore_btn = dialog.add_button("Restaurar Respaldo", gtk4::ResponseType::Accept);
+                                restore_btn.add_css_class("suggested-action");
+
+                                dialog.connect_response(move |dlg, response| {
+                                    dlg.close();
+                                    if response == gtk4::ResponseType::Accept {
+                                        // Ejecutar la restauración y actualizar lista de paquetes
+                                        let cp_status = Command::new("pkexec")
+                                            .arg("cp")
+                                            .arg("/etc/apt/sources.list.scud.bak")
+                                            .arg("/etc/apt/sources.list")
+                                            .status();
+
+                                        if let Ok(s) = cp_status {
+                                            if s.success() {
+                                                let _ = Command::new("pkexec")
+                                                    .arg("apt-get")
+                                                    .arg("update")
+                                                    .status();
+                                            }
+                                        }
+                                    }
+                                });
+                            }
+                        }
+
+                        dialog.show();
+                        return glib::ControlFlow::Break;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        if let Some(id) = pulse_source.borrow_mut().take() {
+                            id.remove();
+                        }
+                        win_to_close.close();
+                        return glib::ControlFlow::Break;
+                    }
                 }
             }
+            glib::ControlFlow::Continue
         });
     };
 

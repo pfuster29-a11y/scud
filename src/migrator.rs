@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 use crate::backup::SystemBackup;
 
 pub struct Migrator {
@@ -123,9 +124,33 @@ impl Migrator {
 
         let new_content = updated_lines.join("\n") + "\n";
 
-        // 3. Escribir el nuevo archivo
-        fs::write(path, new_content)
-            .map_err(|e| format!("Error al escribir el nuevo sources.list: {}", e))?;
+        // 3. Escribir el nuevo archivo.
+        // No podemos usar `fs::write` directo: /etc/apt/ es de root y un usuario
+        // normal no tiene permiso para escribir ahí. Por eso escribimos el
+        // contenido nuevo en un archivo temporal (que sí podemos crear, porque
+        // /tmp es de todos), y luego usamos pkexec para que sea root quien
+        // copie ese temporal sobre el sources.list real.
+        let tmp_path = std::env::temp_dir().join(format!("scud_sources_{}.tmp", std::process::id()));
+        fs::write(&tmp_path, &new_content)
+            .map_err(|e| format!("Error al escribir archivo temporal: {}", e))?;
+
+        let status = Command::new("pkexec")
+            .arg("cp")
+            .arg("--")
+            .arg(&tmp_path)
+            .arg(path)
+            .status()
+            .map_err(|e| format!("Error al invocar pkexec para escribir sources.list: {}", e));
+
+        // Borramos el temporal sin importar si el pkexec salió bien o mal.
+        let _ = fs::remove_file(&tmp_path);
+
+        let status = status?;
+        if !status.success() {
+            return Err(
+                "Error al escribir el nuevo sources.list (pkexec falló o fue cancelado por el usuario).".to_string()
+            );
+        }
 
         println!("[Migrator] Migración a '{}' preparada con éxito (repositorios incompatibles comentados).", target_codename);
         Ok(())

@@ -15,8 +15,22 @@ impl SystemBackup {
 
         let backup_path = format!("{}.scud.bak", sources_path);
 
-        fs::copy(path, &backup_path)
-            .map_err(|e| format!("Error al crear el respaldo de sources.list: {}", e))?;
+        // /etc/apt/ pertenece a root, así que un `fs::copy` normal (con los permisos
+        // de un usuario común) falla con "Permiso denegado". Usamos pkexec para que
+        // el propio comando `cp` corra con privilegios elevados.
+        let status = Command::new("pkexec")
+            .arg("cp")
+            .arg("--")
+            .arg(sources_path)
+            .arg(&backup_path)
+            .status()
+            .map_err(|e| format!("Error al invocar pkexec para el respaldo: {}", e))?;
+
+        if !status.success() {
+            return Err(
+                "Error al crear el respaldo de sources.list (pkexec falló o fue cancelado por el usuario).".to_string()
+            );
+        }
 
         println!("[Backup] Respaldo de sources.list generado con éxito en: {}", backup_path);
         Ok(())

@@ -344,6 +344,8 @@ fn build_ui(app: &Application) {
         let win_to_close = upgrade_win.clone();
         let parent_window = window_clone_for_upgrade.clone();
         let progress_bar_clone = progress_bar.clone();
+        let tab2_status_clone2 = tab2_status_for_upgrade.clone();
+        let btn_migrate_clone2 = btn_migrate_for_upgrade.clone();
 
         // Sondeamos el canal seguido (cada 80ms) para que la terminal se sienta
         // "en vivo" en lugar de actualizarse a los tirones.
@@ -372,10 +374,10 @@ fn build_ui(app: &Application) {
                                 // El sistema ya quedó en Sid (paquetes instalados), independientemente
                                 // de si el usuario reinicia ahora o más tarde. Reflejamos eso en la
                                 // pestaña de migración: el botón queda deshabilitado para siempre.
-                                tab2_status_for_upgrade.set_text(
+                                tab2_status_clone2.set_text(
                                     "✅ Migración completada. El sistema está en Debian Sid — reiniciá cuanto antes."
                                 );
-                                btn_migrate_for_upgrade.set_sensitive(false);
+                                btn_migrate_clone2.set_sensitive(false);
 
                                 dialog.set_message_type(MessageType::Info);
                                 dialog.set_text(Some("🎉 ¡Sistema actualizado a Debian Sid con éxito!"));
@@ -401,8 +403,8 @@ fn build_ui(app: &Application) {
                             Err(msg) => {
                                 // Falló apt (no la preparación de sources.list, que ya había salido bien
                                 // antes de llegar acá). Reactivamos el botón para permitir reintentar.
-                                tab2_status_for_upgrade.set_text(&format!("❌ Error durante la actualización: {}", msg));
-                                btn_migrate_for_upgrade.set_sensitive(true);
+                                tab2_status_clone2.set_text(&format!("❌ Error durante la actualización: {}", msg));
+                                btn_migrate_clone2.set_sensitive(true);
 
                                 dialog.set_message_type(MessageType::Error);
                                 dialog.set_text(Some("❌ Hubo un error durante la actualización"));

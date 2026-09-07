@@ -32,6 +32,18 @@ fn check_backup_tools() -> (bool, bool) {
     (timeshift, snapper)
 }
 
+/// Detecta si el sistema ya está corriendo Debian Sid (Unstable).
+/// `/etc/debian_version` en Sid siempre contiene la palabra "sid" en su
+/// contenido (ej: "trixie/sid"), independientemente de qué versión de
+/// Debian sea "testing" en este momento. Es la forma más simple y
+/// confiable de chequear esto sin depender de `lsb_release` (que no
+/// siempre viene instalado de fábrica).
+fn is_system_on_sid() -> bool {
+    std::fs::read_to_string("/etc/debian_version")
+        .map(|content| content.to_lowercase().contains("sid"))
+        .unwrap_or(false)
+}
+
 fn create_package_row(name: &str, desc: &str, is_safe: bool) -> ListBoxRow {
     let row_box = Box::builder()
         .orientation(Orientation::Horizontal)
@@ -187,6 +199,13 @@ fn build_ui(app: &Application) {
     let tab2_status = Label::builder().label("").halign(Align::Center).build();
     let btn_migrate = Button::builder().label("Convertir a Debian Sid (¡Riesgoso!)").halign(Align::Center).build();
 
+    // Si el sistema ya está en Sid, no tiene sentido ofrecer "migrar" de nuevo:
+    // deshabilitamos el botón y avisamos desde el arranque.
+    if is_system_on_sid() {
+        btn_migrate.set_sensitive(false);
+        tab2_status.set_text("✅ Este sistema ya está corriendo Debian Sid (Unstable).");
+    }
+
     tab2_vbox.append(&migrate_info);
     tab2_vbox.append(&btn_migrate);
     tab2_vbox.append(&tab2_status);
@@ -204,6 +223,8 @@ fn build_ui(app: &Application) {
 
     // --- Función para mostrar ventana de progreso de actualización ---
     let window_clone_for_upgrade = window.clone();
+    let tab2_status_for_upgrade = tab2_status.clone();
+    let btn_migrate_for_upgrade = btn_migrate.clone();
     let run_upgrade_window = move || {
         let upgrade_win = ApplicationWindow::builder()
             .transient_for(&window_clone_for_upgrade)
@@ -348,13 +369,25 @@ fn build_ui(app: &Application) {
 
                         match result {
                             Ok(()) => {
+                                // El sistema ya quedó en Sid (paquetes instalados), independientemente
+                                // de si el usuario reinicia ahora o más tarde. Reflejamos eso en la
+                                // pestaña de migración: el botón queda deshabilitado para siempre.
+                                tab2_status_for_upgrade.set_text(
+                                    "✅ Migración completada. El sistema está en Debian Sid — reiniciá cuanto antes."
+                                );
+                                btn_migrate_for_upgrade.set_sensitive(false);
+
                                 dialog.set_message_type(MessageType::Info);
                                 dialog.set_text(Some("🎉 ¡Sistema actualizado a Debian Sid con éxito!"));
                                 dialog.set_secondary_text(Some(
                                     "Se han aplicado todos los cambios del repositorio inestable.\n\n\
-                                    Es necesario reiniciar el equipo ahora para cargar el nuevo kernel y servicios."
+                                    Es necesario reiniciar el equipo para cargar el nuevo kernel y servicios.\n\n\
+                                    ⚠️ Si no reiniciás ahora, el sistema puede quedar en un estado inestable: \
+                                    algunos servicios seguirían corriendo en memoria con versiones viejas de \
+                                    librerías, mientras el disco ya tiene las nuevas. Te recomendamos reiniciar \
+                                    cuanto antes, aunque no sea en este instante."
                                 ));
-                                dialog.add_button("Cancelar", gtk4::ResponseType::Cancel);
+                                dialog.add_button("Reiniciar Más Tarde", gtk4::ResponseType::Cancel);
                                 let reboot_btn = dialog.add_button("Reiniciar Ahora", gtk4::ResponseType::Ok);
                                 reboot_btn.add_css_class("suggested-action");
 
@@ -366,6 +399,11 @@ fn build_ui(app: &Application) {
                                 });
                             }
                             Err(msg) => {
+                                // Falló apt (no la preparación de sources.list, que ya había salido bien
+                                // antes de llegar acá). Reactivamos el botón para permitir reintentar.
+                                tab2_status_for_upgrade.set_text(&format!("❌ Error durante la actualización: {}", msg));
+                                btn_migrate_for_upgrade.set_sensitive(true);
+
                                 dialog.set_message_type(MessageType::Error);
                                 dialog.set_text(Some("❌ Hubo un error durante la actualización"));
                                 dialog.set_secondary_text(Some(&format!(

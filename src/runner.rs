@@ -137,6 +137,38 @@ pub fn run_privileged_apt_streaming(args: &[&str], sender: Sender<AptLine>) {
     }
 }
 
+/// Pone o saca la marca de "retenido" (hold) sobre una lista de paquetes usando
+/// `apt-mark`. Se usa para excluir puntualmente, de una corrida de `full-upgrade`,
+/// los paquetes que el usuario decidió no actualizar (los que destildó en la lista).
+/// `action` debe ser "hold" o "unhold".
+///
+/// Si `packages` está vacío, no hace nada (no hay nada que retener/liberar) y
+/// devuelve éxito directamente, sin pedir contraseña de más.
+pub fn run_apt_mark(action: &str, packages: &[String]) -> Result<(), String> {
+    if packages.is_empty() {
+        return Ok(());
+    }
+
+    let mut cmd = Command::new("pkexec");
+    cmd.arg("apt-mark").arg(action);
+    for pkg in packages {
+        cmd.arg(pkg);
+    }
+
+    let status = cmd
+        .status()
+        .map_err(|e| format!("Error al invocar pkexec para apt-mark {}: {}", action, e))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "apt-mark {} falló o fue cancelado por el usuario.",
+            action
+        ))
+    }
+}
+
 /// Performs a full system audit: updates package lists via pkexec, then simulates upgrades.
 pub fn run_full_audit() -> Result<String, String> {
     // 1. Actualizamos las listas de repositorios con privilegios de root (pedirá contraseña)

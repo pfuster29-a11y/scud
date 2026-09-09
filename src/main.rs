@@ -114,6 +114,18 @@ fn create_package_row(name: &str, desc: &str, safety: risk_analyzer::SafetyLevel
 fn build_ui(app: &Application) {
     let notebook = Notebook::new();
 
+    // Creamos la ventana principal ACÁ (temprano), antes de armar las pestañas,
+    // porque el manejador de "Refrescar Lista" (más abajo) necesita poder usarla
+    // como ventana "padre" para el aviso de paquetes peligrosos. Todavía no le
+    // asignamos contenido (`set_child`) — eso se hace más adelante, una vez que
+    // el notebook ya tiene las dos pestañas completas.
+    let window = ApplicationWindow::builder()
+        .application(app)
+        .title("Scud - Gestor de Actualizaciones Seguras")
+        .default_width(750)
+        .default_height(550)
+        .build();
+
     // ==========================================
     // PESTAÑA 1: MANTENIMIENTO SID
     // ==========================================
@@ -320,13 +332,9 @@ fn build_ui(app: &Application) {
     let tab2_label = Label::new(Some("Migrar Sistema"));
     notebook.append_page(&tab2_vbox, Some(&tab2_label));
 
-    let window = ApplicationWindow::builder()
-        .application(app)
-        .title("Scud - Gestor de Actualizaciones Seguras")
-        .default_width(750)
-        .default_height(550)
-        .child(&notebook)
-        .build();
+    // El notebook ya tiene las dos pestañas completas: recién ahora le asignamos
+    // el contenido a la ventana (creada más arriba, antes de la pestaña 1).
+    window.set_child(Some(&notebook));
 
     // --- Función para mostrar ventana de progreso de actualización ---
     let window_clone_for_upgrade = window.clone();

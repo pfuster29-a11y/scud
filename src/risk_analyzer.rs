@@ -64,7 +64,9 @@ impl PackageRiskAnalyzer {
         }
     }
 
-    /// Analyze a single package to determine its safety level
+    /// Analyze a single package to determine its safety level.
+    /// Mantiene la firma vieja por compatibilidad (y porque los tests ya la usan);
+    /// internamente delega en `analyze_package_detailed` para no duplicar la lógica.
     pub fn analyze_package(
         &self,
         name: &str,
@@ -72,39 +74,63 @@ impl PackageRiskAnalyzer {
         version_to: &str,
         dependent_count: usize,
     ) -> SafetyLevel {
+        self.analyze_package_detailed(name, version_from, version_to, dependent_count).0
+    }
+
+    /// Igual que `analyze_package`, pero además devuelve una explicación en criollo
+    /// de POR QUÉ se clasificó así — para mostrarle al usuario el motivo real en
+    /// vez de solo un semáforo de color sin contexto.
+    pub fn analyze_package_detailed(
+        &self,
+        name: &str,
+        version_from: &str,
+        version_to: &str,
+        dependent_count: usize,
+    ) -> (SafetyLevel, Option<String>) {
         // 1. Known problematic packages → RED
-        if self
-            .known_problematic
-            .iter()
-            .any(|p| name.contains(p))
-        {
-            return SafetyLevel::Red;
+        if let Some(matched) = self.known_problematic.iter().find(|p| name.contains(p.as_str())) {
+            return (
+                SafetyLevel::Red,
+                Some(format!("Paquete con antecedentes de dar problemas (coincide con \"{}\")", matched)),
+            );
         }
 
         // 2. Critical system packages → YELLOW
         if self.critical_packages.iter().any(|p| name == p) {
-            return SafetyLevel::Yellow;
+            return (
+                SafetyLevel::Yellow,
+                Some("Es un paquete crítico del sistema (afecta el arranque o la base del sistema)".to_string()),
+            );
         }
 
         // 3. Many dependents → YELLOW
         if dependent_count > 10 {
-            return SafetyLevel::Yellow;
+            return (
+                SafetyLevel::Yellow,
+                Some(format!("Tiene muchos paquetes que dependen de él ({})", dependent_count)),
+            );
         }
 
         // 4. Major version jump (1.x → 2.x) → YELLOW
         if Self::is_major_version_jump(version_from, version_to) {
-            return SafetyLevel::Yellow;
+            return (
+                SafetyLevel::Yellow,
+                Some(format!("Salto de versión mayor ({} → {})", version_from, version_to)),
+            );
         }
 
         // 5. Historical failures → RED
         if let Some(record) = self.update_history.get(name) {
             if !record.success {
-                return SafetyLevel::Red;
+                return (
+                    SafetyLevel::Red,
+                    Some("Ya falló en una actualización anterior en este mismo sistema".to_string()),
+                );
             }
         }
 
         // Default: GREEN
-        SafetyLevel::Green
+        (SafetyLevel::Green, None)
     }
 
     fn is_major_version_jump(from: &str, to: &str) -> bool {

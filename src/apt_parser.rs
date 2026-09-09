@@ -17,12 +17,20 @@ pub struct PackageChange {
     pub version_from: String,
     pub version_to: String,
     pub safety_level: SafetyLevel,
+    /// Explicación en criollo de por qué se clasificó así. `None` para los
+    /// paquetes Verdes (no hace falta justificar por qué algo es seguro).
+    pub risk_reason: Option<String>,
 }
 
 /// Parses the raw output of `apt-get dist-upgrade --just-print`, usando el
 /// `PackageRiskAnalyzer` para decidir el nivel de seguridad real de cada
 /// paquete que se instala o configura (en vez de asumir que todo lo que no
-/// es una remoción es automáticamente "seguro").
+/// es una remoción es automáticamente "seguro"), y guardando el motivo de
+/// cada clasificación para poder mostrárselo al usuario.
+///
+/// El resultado queda ordenado de más peligroso a menos peligroso (Rojo
+/// primero, después Amarillo, después Verde), para que lo que necesita
+/// atención aparezca arriba de todo en vez de perderse al final de la lista.
 ///
 /// Nota: `dependent_count` se pasa siempre en 0 por ahora, porque el output
 /// de `--just-print` no nos da esa información directamente. Es un dato que
@@ -41,7 +49,8 @@ pub fn parse_apt_output(raw_output: &str, analyzer: &PackageRiskAnalyzer) -> Vec
                 let version_from = parts[2].trim_matches(|c| c == '[' || c == ']').to_string();
                 let version_to = parts[3].trim_matches(|c| c == '(' || c == ')').to_string();
 
-                let safety_level = analyzer.analyze_package(&name, &version_from, &version_to, 0);
+                let (safety_level, risk_reason) =
+                    analyzer.analyze_package_detailed(&name, &version_from, &version_to, 0);
                 let risk = if safety_level == SafetyLevel::Green { RiskLevel::Safe } else { RiskLevel::Critical };
 
                 changes.push(PackageChange {
@@ -51,6 +60,7 @@ pub fn parse_apt_output(raw_output: &str, analyzer: &PackageRiskAnalyzer) -> Vec
                     version_from,
                     version_to,
                     safety_level,
+                    risk_reason,
                 });
             }
         } else if trimmed.starts_with("Remv ") {
@@ -65,6 +75,7 @@ pub fn parse_apt_output(raw_output: &str, analyzer: &PackageRiskAnalyzer) -> Vec
                     version_from: parts.get(2).map(|s| s.to_string()).unwrap_or_default(),
                     version_to: String::new(),
                     safety_level: SafetyLevel::Red,
+                    risk_reason: Some("Esta actualización requiere remover el paquete del sistema".to_string()),
                 });
             }
         } else if trimmed.starts_with("Conf ") {
@@ -72,7 +83,8 @@ pub fn parse_apt_output(raw_output: &str, analyzer: &PackageRiskAnalyzer) -> Vec
             if parts.len() >= 2 {
                 let name = parts[1].to_string();
                 let version_to = parts.get(2).map(|s| s.to_string()).unwrap_or_default();
-                let safety_level = analyzer.analyze_package(&name, "", &version_to, 0);
+                let (safety_level, risk_reason) =
+                    analyzer.analyze_package_detailed(&name, "", &version_to, 0);
                 let risk = if safety_level == SafetyLevel::Green { RiskLevel::Safe } else { RiskLevel::Critical };
 
                 changes.push(PackageChange {
@@ -82,6 +94,7 @@ pub fn parse_apt_output(raw_output: &str, analyzer: &PackageRiskAnalyzer) -> Vec
                     version_from: String::new(),
                     version_to,
                     safety_level,
+                    risk_reason,
                 });
             }
         } else if trimmed.starts_with("Purg ") {
@@ -95,10 +108,15 @@ pub fn parse_apt_output(raw_output: &str, analyzer: &PackageRiskAnalyzer) -> Vec
                     version_from: parts.get(2).map(|s| s.to_string()).unwrap_or_default(),
                     version_to: String::new(),
                     safety_level: SafetyLevel::Red,
+                    risk_reason: Some("Este paquete será purgado (borrado junto con su configuración)".to_string()),
                 });
             }
         }
     }
+
+    // Los más peligrosos van primero, para que salten a la vista de inmediato
+    // en vez de quedar escondidos al final de una lista larga.
+    changes.sort_by(|a, b| b.safety_level.cmp(&a.safety_level));
 
     changes
 }

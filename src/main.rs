@@ -46,11 +46,11 @@ fn is_system_on_sid() -> bool {
 }
 
 /// Construye una fila de la lista de paquetes. El casillero arranca tildado
-/// solo para los paquetes Verdes (seguros de instalar sin revisión); los
-/// Amarillos (riesgo moderado) y Rojos (peligrosos) arrancan destildados,
-/// para que el usuario tenga que decidir conscientemente si los quiere
-/// incluir en la próxima actualización.
-fn create_package_row(name: &str, desc: &str, safety: risk_analyzer::SafetyLevel) -> (ListBoxRow, CheckButton) {
+/// para Verdes y Amarillos (Scud avisa, pero no te impide instalar algo de
+/// riesgo moderado si vos querés). Los Rojos SIEMPRE arrancan destildados —
+/// esa es la única barrera que Scud no te deja saltear con un solo click;
+/// si de verdad querés instalar algo rojo, tenés que tildarlo vos a mano.
+fn create_package_row(name: &str, desc: &str, safety: risk_analyzer::SafetyLevel, reason: Option<&str>) -> (ListBoxRow, CheckButton) {
     use risk_analyzer::SafetyLevel;
 
     let row_box = Box::builder()
@@ -63,7 +63,7 @@ fn create_package_row(name: &str, desc: &str, safety: risk_analyzer::SafetyLevel
         .build();
 
     let check = CheckButton::builder().valign(Align::Center).build();
-    if safety == SafetyLevel::Green {
+    if safety != SafetyLevel::Red {
         check.set_active(true);
     }
 
@@ -86,9 +86,17 @@ fn create_package_row(name: &str, desc: &str, safety: risk_analyzer::SafetyLevel
         .css_classes(vec!["heading".to_string()])
         .build();
 
+    // El motivo, cuando existe, se muestra siempre — es lo que le permite al
+    // usuario auditar por qué Scud clasificó así este paquete en particular,
+    // en vez de tener que confiar a ciegas en el color del semáforo.
+    let subtitle_text = match reason {
+        Some(r) => format!("{} — {} ({})", desc, level_text, r),
+        None => format!("{} — {}", desc, level_text),
+    };
     let subtitle = Label::builder()
-        .label(&format!("{} — {}", desc, level_text))
+        .label(&subtitle_text)
         .halign(Align::Start)
+        .wrap(true)
         .build();
 
     text_box.append(&title);
@@ -119,6 +127,7 @@ fn build_ui(app: &Application) {
         "Scud",
         "Presiona 'Refrescar Lista' para auditar paquetes.",
         risk_analyzer::SafetyLevel::Green,
+        None,
     );
     list_box.append(&initial_row);
 
@@ -137,20 +146,23 @@ fn build_ui(app: &Application) {
 
     let btn_refresh = Button::builder().label("Refrescar Lista").build();
     let btn_hold = Button::builder().label("Gestionar Retenciones").build();
+    let btn_select_safe = Button::builder().label("Seleccionar Todo (excepto peligrosos)").build();
     let btn_apply = Button::builder().label("Aplicar Actualizaciones Seguras").css_classes(vec!["suggested-action".to_string()]).build();
     // Arranca deshabilitado: recién hay algo para aplicar después de un "Refrescar Lista" real.
     btn_apply.set_sensitive(false);
+    btn_select_safe.set_sensitive(false);
 
     // Guarda, para cada paquete listado, su nombre + versiones + el casillero (checkbox)
     // correspondiente. Así, cuando el usuario toque "Aplicar Actualizaciones Seguras",
     // podemos leer exactamente cuáles quedaron tildados y cuáles no, y además guardar
     // un historial con datos reales de versión (para el sistema de "fallos previos"
     // del analizador de riesgo).
-    let package_checkboxes: Rc<RefCell<Vec<(String, CheckButton, String, String)>>> = Rc::new(RefCell::new(Vec::new()));
+    let package_checkboxes: Rc<RefCell<Vec<(String, CheckButton, String, String, risk_analyzer::SafetyLevel)>>> = Rc::new(RefCell::new(Vec::new()));
 
     bottom_bar.append(&status_label);
     bottom_bar.append(&btn_refresh);
     bottom_bar.append(&btn_hold);
+    bottom_bar.append(&btn_select_safe);
     bottom_bar.append(&btn_apply);
 
     tab1_vbox.append(&scrolled_window);
@@ -160,9 +172,10 @@ fn build_ui(app: &Application) {
     notebook.append_page(&tab1_vbox, Some(&tab1_label));
 
     // --- Lógica: Refrescar Lista (Auditoría) ---
-    btn_refresh.connect_clicked(glib::clone!(@weak list_box, @weak status_label, @strong btn_refresh, @strong btn_apply, @strong package_checkboxes => move |_| {
+    btn_refresh.connect_clicked(glib::clone!(@weak window, @weak list_box, @weak status_label, @strong btn_refresh, @strong btn_apply, @strong btn_select_safe, @strong package_checkboxes => move |_| {
         btn_refresh.set_sensitive(false);
         btn_apply.set_sensitive(false);
+        btn_select_safe.set_sensitive(false);
         status_label.set_text("Ejecutando auditoría de paquetes...");
 
         while let Some(child) = list_box.first_child() {
@@ -180,7 +193,9 @@ fn build_ui(app: &Application) {
         let status_label_clone = status_label.clone();
         let btn_refresh_clone = btn_refresh.clone();
         let btn_apply_clone = btn_apply.clone();
+        let btn_select_safe_clone = btn_select_safe.clone();
         let package_checkboxes_clone = package_checkboxes.clone();
+        let window_clone = window.clone();
 
         glib::timeout_add_local(Duration::from_millis(100), move || -> glib::ControlFlow {
             match receiver.try_recv() {
@@ -198,23 +213,57 @@ fn build_ui(app: &Application) {
                                 status_label_clone.set_text("El sistema está 100% al día.");
                             } else {
                                 let (green, yellow, red) = apt_parser::count_by_safety(&changes);
+                                let mut red_names: Vec<String> = Vec::new();
 
                                 for change in &changes {
                                     let desc = format!("{:?} -> Detectado en la cola de APT", change.action);
-                                    let (row, checkbox) = create_package_row(&change.name, &desc, change.safety_level);
+                                    let (row, checkbox) = create_package_row(
+                                        &change.name,
+                                        &desc,
+                                        change.safety_level,
+                                        change.risk_reason.as_deref(),
+                                    );
                                     list_box_clone.append(&row);
                                     package_checkboxes_clone.borrow_mut().push((
                                         change.name.clone(),
                                         checkbox,
                                         change.version_from.clone(),
                                         change.version_to.clone(),
+                                        change.safety_level,
                                     ));
+                                    if change.safety_level == risk_analyzer::SafetyLevel::Red {
+                                        red_names.push(change.name.clone());
+                                    }
                                 }
                                 status_label_clone.set_text(&format!(
                                     "{} seguros, {} riesgo moderado, {} peligrosos",
                                     green, yellow, red
                                 ));
                                 btn_apply_clone.set_sensitive(true);
+                                btn_select_safe_clone.set_sensitive(true);
+
+                                // Aviso puntual (una sola vez por refresco, no invasivo) si
+                                // apareció algún paquete peligroso — así no depende de que el
+                                // usuario note el color en la lista.
+                                if !red_names.is_empty() {
+                                    let dialog = MessageDialog::builder()
+                                        .transient_for(&window_clone)
+                                        .modal(true)
+                                        .message_type(MessageType::Warning)
+                                        .text(&format!(
+                                            "Se detectaron {} paquete(s) peligroso(s)",
+                                            red_names.len()
+                                        ))
+                                        .secondary_text(&format!(
+                                            "Estos paquetes quedaron destildados por defecto:\n\n{}\n\n\
+                                            Revisá el motivo en cada fila de la lista antes de decidir si los querés instalar.",
+                                            red_names.join("\n")
+                                        ))
+                                        .build();
+                                    dialog.add_button("Entendido", gtk4::ResponseType::Close);
+                                    dialog.connect_response(|dlg, _| dlg.close());
+                                    dialog.show();
+                                }
                             }
                         }
                         Err(e) => { status_label_clone.set_text(&format!("Error: {}", e)); }
@@ -229,6 +278,19 @@ fn build_ui(app: &Application) {
                 }
             }
         });
+    }));
+
+    // --- Lógica: "Seleccionar Todo (excepto peligrosos)" ---
+    // Tilda de una todos los casilleros de Verde y Amarillo, respetando la única
+    // barrera que Scud no te deja saltear con un solo click: los paquetes Rojos
+    // se quedan como estén (si querés instalar uno rojo, lo tildás vos a mano,
+    // fila por fila — a propósito, para que sea una decisión consciente).
+    btn_select_safe.connect_clicked(glib::clone!(@strong package_checkboxes => move |_| {
+        for (_, checkbox, _, _, safety) in package_checkboxes.borrow().iter() {
+            if *safety != risk_analyzer::SafetyLevel::Red {
+                checkbox.set_active(true);
+            }
+        }
     }));
 
     // ==========================================
@@ -765,15 +827,15 @@ fn build_ui(app: &Application) {
         let held_packages: Vec<String> = package_checkboxes
             .borrow()
             .iter()
-            .filter(|(_, checkbox, _, _)| !checkbox.is_active())
-            .map(|(name, _, _, _)| name.clone())
+            .filter(|(_, checkbox, _, _, _)| !checkbox.is_active())
+            .map(|(name, _, _, _, _)| name.clone())
             .collect();
 
         let applied_packages: Vec<(String, String, String)> = package_checkboxes
             .borrow()
             .iter()
-            .filter(|(_, checkbox, _, _)| checkbox.is_active())
-            .map(|(name, _, vf, vt)| (name.clone(), vf.clone(), vt.clone()))
+            .filter(|(_, checkbox, _, _, _)| checkbox.is_active())
+            .map(|(name, _, vf, vt, _)| (name.clone(), vf.clone(), vt.clone()))
             .collect();
 
         let (has_timeshift, has_snapper) = check_backup_tools();
